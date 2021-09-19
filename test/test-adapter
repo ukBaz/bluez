@@ -1,146 +1,118 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
-
-from __future__ import absolute_import, print_function, unicode_literals
-
-from optparse import OptionParser, make_option
+import argparse
 import sys
-import time
-import dbus
 import bluezutils
 
-bus = dbus.SystemBus()
+from gi.repository import GLib
 
-option_list = [
-		make_option("-i", "--device", action="store",
-				type="string", dest="dev_id"),
-		]
-parser = OptionParser(option_list=option_list)
 
-(options, args) = parser.parse_args()
+def _available_adapters():
+    """Print the list of available adapters"""
+    mngd_objs = bluezutils.get_managed_objects()
+    print("\nAvailable values to use for adapter device:")
+    print(f'{"D-Bus path":>20} | {"mac address"}')
+    print(f'{"-" * 12:>21}|{"-" * 12}')
+    for path, adapter in mngd_objs.items():
+        address = adapter.get(bluezutils.ADAPTER_INTERFACE, {}).get("Address")
+        if address:
+            print(f"{path:>20} | {address}")
 
-adapter_path = bluezutils.find_adapter(options.dev_id).object_path
-adapter = dbus.Interface(bus.get_object("org.bluez", adapter_path),
-					"org.freedesktop.DBus.Properties")
 
-if (len(args) < 1):
-	print("Usage: %s <command>" % (sys.argv[0]))
-	print("")
-	print("  address")
-	print("  list")
-	print("  name")
-	print("  alias [alias]")
-	print("  powered [on/off]")
-	print("  pairable [on/off]")
-	print("  pairabletimeout [timeout]")
-	print("  discoverable [on/off]")
-	print("  discoverabletimeout [timeout]")
-	print("  discovering")
-	sys.exit(1)
+def directory(args):
+    """If adapter device address pattern given, show available properties
+    on adapter else show possible values for device address"""
+    if args.device:
+        try:
+            adapter = bluezutils.find_adapter(args.device[0])
+        except bluezutils.NoBluezAdapterFound as err:
+            print("\n***Error:", err)
+            adapter = None
+        if adapter:
+            _introspect = bluezutils.introspect(adapter.get_object_path())
+            for prop in _introspect[bluezutils.ADAPTER_INTERFACE]["property"]:
+                print(
+                    f'\tProperty: {prop.get("name"):<20}  '
+                    f'Type: {prop.get("type"):>3}  '
+                    f'Access: {prop.get("access")}'
+                )
+            return
 
-if (args[0] == "address"):
-	addr = adapter.Get("org.bluez.Adapter1", "Address")
-	print(addr)
-	sys.exit(0)
+    _available_adapters()
 
-if (args[0] == "name"):
-	name = adapter.Get("org.bluez.Adapter1", "Name")
-	print(name)
-	sys.exit(0)
 
-if (args[0] == "alias"):
-	if (len(args) < 2):
-		alias = adapter.Get("org.bluez.Adapter1", "Alias")
-		print(alias)
-	else:
-		adapter.Set("org.bluez.Adapter1", "Alias", args[1])
-	sys.exit(0)
+def read(args):
+    """Read a property on the adapter specified"""
+    adapter_path = bluezutils.find_adapter(args.device).get_object_path()
+    adapter_props = bluezutils.get_proxy(adapter_path, bluezutils.PROPERTIES_IACE)
+    value = adapter_props.Get("(ss)", bluezutils.ADAPTER_INTERFACE, args.property)
+    print(f"{args.property}: {value}")
 
-if (args[0] == "list"):
-	if (len(args) < 2):
-		om = dbus.Interface(bus.get_object("org.bluez", "/"),
-					"org.freedesktop.DBus.ObjectManager")
-		objects = om.GetManagedObjects()
-		for path, interfaces in objects.iteritems():
-			if "org.bluez.Adapter1" not in interfaces:
-				continue
 
-			print(" [ %s ]" % (path))
+def write(args):
+    """Write to property on adapter"""
+    adapter_path = bluezutils.find_adapter(args.device).get_object_path()
+    adapter_props = bluezutils.get_proxy(adapter_path, bluezutils.PROPERTIES_IACE)
+    _intro = bluezutils.introspect(adapter_path)
+    (prop_type,) = [
+        _["type"]
+        for _ in _intro[bluezutils.ADAPTER_INTERFACE]["property"]
+        if args.property in _.values()
+    ]
+    if prop_type == "b":  # Boolean value
+        if args.value.casefold() == "true":
+            value = GLib.Variant(prop_type, True)
+        else:
+            value = GLib.Variant(prop_type, False)
+    elif prop_type == "u":  # 32-bit unsigned integer
+        value = GLib.Variant(prop_type, int(args.property))
+    elif prop_type == "s":  # UTF-8 string
+        value = GLib.Variant(prop_type, args.property)
 
-			props = interfaces["org.bluez.Adapter1"]
+    adapter_props.Set("(ssv)", bluezutils.ADAPTER_INTERFACE, args.property, value)
 
-			for (key, value) in props.items():
-				if (key == "Class"):
-					print("    %s = 0x%06x" % (key, value))
-				else:
-					print("    %s = %s" % (key, value))
-			print()
-	sys.exit(0)
 
-if (args[0] == "powered"):
-	if (len(args) < 2):
-		powered = adapter.Get("org.bluez.Adapter1", "Powered")
-		print(powered)
-	else:
-		if (args[1] == "on"):
-			value = dbus.Boolean(1)
-		elif (args[1] == "off"):
-			value = dbus.Boolean(0)
-		else:
-			value = dbus.Boolean(args[1])
-		adapter.Set("org.bluez.Adapter1", "Powered", value)
-	sys.exit(0)
+def parse_args(sys_args):
+    """Parse command line options given"""
+    # create the top-level parser
+    parser = argparse.ArgumentParser(
+        prog=sys_args[0], description="Test properties on adapter"
+    )
+    subparsers = parser.add_subparsers(help="sub-command -h to get more help")
 
-if (args[0] == "pairable"):
-	if (len(args) < 2):
-		pairable = adapter.Get("org.bluez.Adapter1", "Pairable")
-		print(pairable)
-	else:
-		if (args[1] == "on"):
-			value = dbus.Boolean(1)
-		elif (args[1] == "off"):
-			value = dbus.Boolean(0)
-		else:
-			value = dbus.Boolean(args[1])
-		adapter.Set("org.bluez.Adapter1", "Pairable", value)
-	sys.exit(0)
+    # create the parser for the "list" command
+    parser_list = subparsers.add_parser(
+        "list",
+        help=(
+            "List properties on the adapter. "
+            "Will list available adapters if adapter device not specified"
+        ),
+    )
+    parser_list.add_argument(
+        "device", nargs="*", help="mac address or end of D-Bus path"
+    )
+    parser_list.set_defaults(func=directory)
 
-if (args[0] == "pairabletimeout"):
-	if (len(args) < 2):
-		pt = adapter.Get("org.bluez.Adapter1", "PairableTimeout")
-		print(pt)
-	else:
-		timeout = dbus.UInt32(args[1])
-		adapter.Set("org.bluez.Adapter1", "PairableTimeout", timeout)
-	sys.exit(0)
+    # create the parser for the "read" command
+    parser_read = subparsers.add_parser("read", help="Read adapter properties")
+    parser_read.add_argument("device", help="mac address or end of D-Bus path")
+    parser_read.add_argument("property", help="Adapter property to read")
+    parser_read.set_defaults(func=read)
 
-if (args[0] == "discoverable"):
-	if (len(args) < 2):
-		discoverable = adapter.Get("org.bluez.Adapter1", "Discoverable")
-		print(discoverable)
-	else:
-		if (args[1] == "on"):
-			value = dbus.Boolean(1)
-		elif (args[1] == "off"):
-			value = dbus.Boolean(0)
-		else:
-			value = dbus.Boolean(args[1])
-		adapter.Set("org.bluez.Adapter1", "Discoverable", value)
-	sys.exit(0)
+    # create the parser for the "write" command
+    parser_write = subparsers.add_parser("write", help="Write adapter properties")
+    parser_write.add_argument("device", help="mac address or end of D-Bus path")
+    parser_write.add_argument("property", help="Adapter property to write to")
+    parser_write.add_argument("value", help="Value to write to adapter property")
+    parser_write.set_defaults(func=write)
 
-if (args[0] == "discoverabletimeout"):
-	if (len(args) < 2):
-		dt = adapter.Get("org.bluez.Adapter1", "DiscoverableTimeout")
-		print(dt)
-	else:
-		to = dbus.UInt32(args[1])
-		adapter.Set("org.bluez.Adapter1", "DiscoverableTimeout", to)
-	sys.exit(0)
+    return parser.parse_args(sys_args[1:])
 
-if (args[0] == "discovering"):
-	discovering = adapter.Get("org.bluez.Adapter1", "Discovering")
-	print(discovering)
-	sys.exit(0)
 
-print("Unknown command")
-sys.exit(1)
+if __name__ == "__main__":
+    # cmd = 'test-adapter write --device hci0 --property Pairable --value False'
+    # args = parse_args(cmd.split())
+    cmd_args = parse_args(sys.argv)
+    if "func" not in cmd_args:
+        parse_args(["sys.argv", "-h"])
+    cmd_args.func(cmd_args)
